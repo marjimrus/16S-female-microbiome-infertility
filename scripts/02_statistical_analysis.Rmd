@@ -1,0 +1,1396 @@
+---
+title: "Female Reproductive Tract Microbiome Analysis"
+author: "Maria J. Rus"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+
+```{r, include = FALSE}
+# =====================
+#   Knitr setup block
+# =====================
+
+# Loading the 'knitr' library for dynamic report generation in R Markdown
+library(knitr)
+
+# Setting global options for 'knitr' chunks
+opts_chunk$set(
+  tidy = FALSE,      # Do not automatically tidy the code formatting
+  cache = TRUE,      # Enable caching to speed up knitting for repeated runs
+  echo = TRUE,       # Show R code in the output document
+  warning = FALSE,   # Suppress warnings in the output
+  message = FALSE,   # Suppress messages in the output
+  dpi = 300,         # Set image resolution to 100 DPI for plots
+  fig.width = 8,     # Set the default width of figures to 8 inches
+  fig.height = 8,    # Set the default height of figures to 8 inches
+  fig.align = "center" # Align figures to the center of the page
+)
+
+```
+
+
+
+# Loading R packages
+```{r, message = FALSE}
+# =====================
+#   Loading R packages
+# =====================
+
+# ---- Data Manipulation ----
+# 'dplyr', 'tidyverse', 'tibble', 'janitor' for data manipulation and transformation
+library(dplyr)
+library(tidyverse)
+library(tibble)
+library(janitor)
+
+# ---- Data Visualization ----
+# 'ggplot2', 'ggthemes', 'ggsci', 'ggpubr', 'ggrepel' for enhanced data visualization
+library(ggplot2)
+library(ggthemes)
+library(ggsci)
+library(ggpubr)
+library(ggrepel)
+
+# 'ggbeeswarm' for beeswarm plots
+# 'ggtern' for ternary diagrams
+library(ggbeeswarm)
+library(ggtern)
+
+# ---- Ecological and Metataxonomic Analysis ----
+# 'ape', 'vegan', 'phyloseq' for ecological and phylogenetic analysis
+library(ape)
+library(vegan)
+library(phyloseq)
+
+# 'qiimer' for interfacing with QIIME, a platform used in metataxonomic analyses
+library(qiimer)
+
+# ---- Utility and Misc ----
+# 'magrittr' for the pipe operator
+# 'readxl' for reading Excel files
+# 'reshape2' for reshaping data
+# 'viridis', 'RColorBrewer' for color palettes
+library(magrittr)
+library(readxl)
+library(reshape2)
+library(viridis)
+library(RColorBrewer)
+
+# 'pander' for markdown rendering of R objects
+# 'usedist' for distance matrix manipulation
+library(pander)
+library(usedist)
+
+```
+
+
+
+# Define constants
+```{r}
+# ===========================
+#   Define constants
+# ===========================
+
+# Set the root directory to the current directory
+# (This should be changed to the directory where the data files are stored)
+root_dir <- "."
+
+# Note: The files used in this analysis were generated using Qiime2.
+# The specific Qiime2 protocol followed is detailed in 'Qiime2_protocol_document.pdf',
+# which is located in the root directory of this project.
+
+# Define file paths relative to the root directory
+metadata_file <- file.path(root_dir, "metadata.xlsx")
+feature_table_fp <- file.path(root_dir, "feature-table/feature-table.tsv")
+taxo_assignment_fp <- file.path(root_dir, "taxonomy/taxonomy.tsv")
+bc_fp <- file.path(root_dir, "bray/distance-matrix.tsv")
+wu_fp <- file.path(root_dir, "wu/distance-matrix.tsv")
+jc_fp <- file.path(root_dir, "jaccard/distance-matrix.tsv")
+faith_fp <- file.path(root_dir, "faith/alpha-diversity.tsv")
+
+```
+
+
+
+# Read in and Process Data
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+# ===========================
+#   Read in and Process Clinical Data
+# ===========================
+
+# Read in and Process Clinical Data from Mapping File, here named 'metadata'
+# This file, originally used as Mapping File for Qiime2, contains clinical and sample-related information.
+metadata <- read_excel(metadata_file) %>%
+  # Removing the first column, which contains file paths to raw BAM files.
+  # This information is not required for the current analysis, hence removed.
+  dplyr::select(-c(1))
+
+```
+
+
+
+# Custom Themes
+```{r, include = FALSE}
+# ===========================
+#   Define custom themes for ggplot2 visualizations
+# ===========================
+
+# Set a global theme that will apply to all plots
+theme_set(theme_classic() + theme(
+  axis.line.x = element_line(colour = 'black', size = 0.5, linetype = 'solid'),
+  axis.line.y = element_line(colour = 'black', size = 0.5, linetype = 'solid')))
+
+# Custom scatterplot theme
+theme_scatterplot <- function () {
+  theme_base(base_size = 16) +
+    theme(
+      line = element_line(size = 0.5, inherit.blank = FALSE),
+      text = element_text(face = "plain", color = "black"),
+      axis.text.x = element_text(face = "plain", color = "black"),
+      axis.text.y = element_text(face = "plain", color = "black"),
+      plot.background = element_blank())
+}
+
+# Custom boxplot theme
+theme_boxplot <- function () {
+  theme_base(base_size = 16) +
+    theme(
+      line = element_line(size = 0.8),
+      text = element_text(size = 16),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      plot.background = element_blank())
+}
+
+```
+
+
+
+#-------------------------
+
+# OTU Table 
+```{r, include = FALSE, warning = FALSE, message = FALSE}
+# ===========================
+# Processing the OTU Table for Metataxonomic Analysis
+# ===========================
+
+# Read taxonomic assignments and process the data
+assignments <- read_tsv(file = taxo_assignment_fp) %>%
+  dplyr::rename(Lineage = Taxon, OtuID = `Feature ID`) %>%
+  do(bind_cols(., split_assignments(.$Lineage))) %>%
+  mutate_at(taxonomic_ranks, str_remove, "[kpcofgs]__") %>%
+  mutate_at(taxonomic_ranks, na_if, "") %>%
+  mutate(Assignment = simplify_assignments(.[taxonomic_ranks], rank2 = "Family"))
+
+# Read OTU counts, reshape the data, and join with taxonomic assignments
+otu_counts <- readr::read_tsv(feature_table_fp, skip = 1) %>%
+  dplyr::rename(OtuID = "#OTU ID") %>%
+  gather(Sample_ID, Counts, -OtuID) %>%
+  left_join(assignments, by = "OtuID") %>%
+  filter(!str_detect(Family, "mitochondria"),
+         !str_detect(Class, "Chloroplast"),
+         !str_detect(Kingdom, "Unassigned"),
+         !str_detect(Kingdom, "Archaea")) %>%
+  group_by(Sample_ID) %>%
+  filter(sum(Counts) > 0)
+
+# Check for consistency in OTU IDs between count and assignment tables
+if (!all(otu_counts$OtuID %in% assignments$OtuID)) {
+  stop("Some OTUs not in taxonomic assignments table")
+}
+
+# Aggregate counts by taxonomic assignment
+assignment_counts <- otu_counts %>%
+  group_by(Sample_ID, Assignment) %>%
+  summarize(Counts = sum(Counts)) %>%
+  ungroup() %>%
+  group_by(Sample_ID) %>%
+  mutate(Proportion = Counts / sum(Counts)) %>%
+  ungroup()
+
+# Summarize total feature counts for each sample
+read_counts <- otu_counts %>%
+  group_by(Sample_ID) %>%
+  summarize(NumFeatures = sum(Counts))
+
+```
+
+
+
+```{r}
+# ===========================
+#   Check for Missing Samples (Issue 1)
+# ===========================
+# Identify samples present in sample sheet but not in feature table (indicating 0 features)
+metadata %>%
+  filter(!(Sample_ID %in% read_counts$Sample_ID)) %>%
+  select(Sample_ID, Sample_Type_Code) 
+# Action: Review these samples for potential issues in sequencing or data processing.
+
+
+# ===========================
+#   Check for Missing Samples (Issue 2)
+# ===========================
+# Identify samples present in feature table but not in sample sheet (indicating an error)
+read_counts %>%
+  filter(!(Sample_ID %in% metadata$Sample_ID))
+# Action: Investigate these discrepancies to correct any errors in sample tracking.
+
+```
+
+
+
+```{r}
+# ===========================
+#   Link Metadata and Oral Microbiome Data
+# ===========================
+
+# Transform taxonomic abundance data into a wide format for linkage with metadata
+taxonomic_abundance_wide <- pivot_wider(
+  data = assignment_counts, 
+  id_cols = "Sample_ID", 
+  names_from = "Assignment", 
+  values_from = "Proportion"
+) 
+
+# Merge the clinical data (metadata) with the transformed microbiological data
+clin_micro_data <- metadata %>%
+  merge(taxonomic_abundance_wide, by = "Sample_ID") 
+
+```
+
+
+
+# Bacterial Composition and Abundance 
+```{r}
+# ===========================
+#   Bacterial Composition and Abundance Analysis
+# ===========================
+
+# Processing taxonomic assignment counts
+taxa <- assignment_counts %>%
+  # Include only samples present in metadata
+  filter(Sample_ID %in% metadata$Sample_ID) %>% 
+  # Lump less abundant taxa into 'Other' category, keeping top 19 based on proportions
+  mutate(Assignment = fct_lump(Assignment, n = 19, w = Proportion)) %>%
+  # Summing proportions in each sample
+  group_by(Sample_ID, Assignment) %>%
+  summarize(Proportion = sum(Proportion)) %>%   
+  ungroup() %>%
+  # Joining with sample metadata
+  left_join(metadata, by = "Sample_ID") %>%
+  # Averaging proportions within sample type 
+  group_by(Sample_Type_Code, Assignment) %>%
+  summarize(Proportion = mean(Proportion)) %>%   
+  ungroup() %>%
+  # Refining taxon labels for better readability
+  mutate(TaxonLabel = str_remove(Assignment, "^\\w+ "))
+
+# The 'fct_lump' function is used to focus on the top 19 taxa by proportion, 
+# lumping the rest into an 'Other' category, which helps to simplify the analysis 
+# and visualization of the data.
+
+```
+
+
+
+```{r}
+# ------ Define Facet Label Names for Sample Type Variables ------ 
+
+# Creating a named vector to map sample type codes to descriptive names.
+# This will be used for labeling in plots and visualizations.
+Sample_Type_Names <- c(`1` = "Endometrium",
+                       `2` = "Endometrial\nFluid",
+                       `3` = "Vagina",
+                       `4` = "Oral",
+                       `5` = "Feces")
+
+```
+
+
+
+## Figure 1(B): Female gastrointestinal and reproductive microbial profile.
+Relative abundance of the main taxa in the sample types included in the study. Each column corresponds to an individual sample, and the color shows relative abundance
+```{r, fig.width = 10, fig.height = 5}
+# ------ Create a Heatmap to Visualize Bacterial Abundance ------ 
+taxa %>%
+  filter(Timepoint  ==  "1") %>%
+  ggplot(aes(x = SubjectID, y = fct_infreq(TaxonLabel), fill = Proportion)) + 
+  geom_tile() +
+  scale_fill_distiller(palette = "PuRd", direction = 1, name = "Abundance") + 
+  facet_grid(~Sample_Type_Code,
+             labeller = labeller(.cols = Sample_Type_Names),
+             scales = "free", 
+             space = "free") +
+  labs(x = " ", y = "Bacteria") +
+  theme(panel.spacing = unit(0, "lines")) +
+  theme_scatterplot() +
+  theme(text = element_text(size = 16.5, face = "bold"),
+        axis.text.y = element_text(angle = 0, hjust = 1, size = 10, face = "plain", 
+                                   margin = margin(t = 0, r = -5, b = 5, l = 6)),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.text = element_text(size = 10, face = "plain", 
+                                   margin = margin(t = 0, r = 0, b = 0, l = 0)),
+        strip.text.x = element_text(size = 14, vjust = 0.5 , face = "bold"),
+        axis.title.y = element_text(vjust = +2, margin = margin(t = 0, r = 0, b = 0, l = 10)),
+        legend.title = element_text(margin = margin(t = 0, r = 10, b = 5, l = 0)))
+
+ggsave("Figure_1B.png", plot = last_plot(), dpi = 300, width = 9, height = 4, units = "in")
+```
+
+
+
+# Alpha Diversity
+```{r, include = FALSE, message = FALSE, warning = FALSE}
+# ===========================
+#   Calculate and Read in Alpha Diversity Measures
+# ===========================
+
+# Reading Faith's diversity data and renaming for consistency
+faith_df <- read_tsv(file = faith_fp) %>%
+  dplyr::rename(Sample_ID = "#Sample_ID")
+
+# Calculating alpha diversity measures for each sample
+alpha_df <- otu_counts %>%
+  group_by(Sample_ID) %>%
+  summarize(
+    Shannon = diversity(Counts),  # Shannon diversity index
+    Richness = rarefy(Counts, 1000)  # Richness estimated through rarefaction
+  ) %>%
+  # Joining with Faith's diversity data
+  left_join(faith_df, by = "Sample_ID")
+
+
+```
+
+
+
+```{r}
+# ------ Statistical Analysis: Wilcoxon Test for Alpha Diversity Measures ------ 
+
+# Preparing data for analysis
+clin_micro_data.alpha <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID")
+
+# Performing pairwise Wilcoxon tests for Richness and Shannon index across body sites
+Body_Site.rich.wilcox <- compare_means(Richness ~ Body_Site, data = clin_micro_data.alpha, 
+                                    method = "wilcox.test", p.adjust.method = "BH")
+Body_Site.shann.wilcox <- compare_means(Shannon ~ Body_Site, data = clin_micro_data.alpha, 
+                                     method = "wilcox.test", p.adjust.method = "BH")
+
+# Combining results of both Wilcoxon tests into one dataframe
+Wilcox.alpha <- Body_Site.rich.wilcox %>%
+  full_join(Body_Site.shann.wilcox) %>%
+  dplyr::rename(Alpha_dv = .y.)
+
+# Displaying the combined test results
+Wilcox.alpha
+
+```
+
+
+
+```{r}
+# ------ Define Color Palette for Sample Type Codes ------ 
+
+# Creating a named vector to map sample type codes to specific colors.
+# These colors will be used for consistent visual representation of sample types in plots.
+Sample_Type_Colors <- c(
+  "3" = "#d5006f",  # Color for Vagina samples
+  "2" = "#FBB6B7",  # Color for Endometrial Fluid samples
+  "1" = "#995C91",  # Color for Endometrium samples
+  "4" = "#78B6FB",  # Color for Oral samples
+  "5" = "#043854"   # Color for Feces samples
+)
+
+```
+
+
+
+### Figure 1(C): Female gastrointestinal and reproductive microbial profile.
+Violin plot showing Richness and Shannon indexes as alpha diversity. The panels were separated by body sites. The sample types are shown as variables within each body site.
+```{r, fig.width = 10, fig.height = 5}
+# ------ Create Richness Violin Plot ------ 
+richness_plot <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  ggviolin(x = "Sample_Type_Code", y = "Richness", fill = "Sample_Type_Code",
+           add = "boxplot", add.params = list(fill = "white")) +
+  scale_fill_manual(values = Sample_Type_Colors, labels = Sample_Type_Names, name = "Sample Type") +
+  labs(x = "", y = "Richness") +
+  facet_grid(~Body_Site,
+             labeller = labeller(.rows = "Body Site"),
+             switch = "x",
+             scales = "free", 
+             space = "free") +
+  theme_scatterplot() +
+  theme(text = element_text(size = 16, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(angle = 0, hjust = 1, size = 10, face = "plain", 
+                                   margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        legend.text = element_text(face = "plain", margin = margin(b=4)),
+        legend.margin = margin(t = 0, r = 10, b = 30, l = 0))
+    
+```
+
+
+
+```{r, fig.width = 10, fig.height = 5}
+# ------ Create Shannon Violin Plot ------ 
+shannon_plot <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  ggviolin(x = "Sample_Type_Code", y = "Shannon", fill = "Sample_Type_Code", 
+           add = "boxplot", add.params = list(fill = "white")) +
+  scale_fill_manual(values = Sample_Type_Colors, labels = Sample_Type_Names, name = "Sample Type") +
+  labs(x = "", y = "Shannon") +
+  facet_grid(~Body_Site,
+             labeller = labeller(.rows = "Body Site"),
+             switch = "x",
+             scales = "free", 
+             space = "free") +
+  theme_scatterplot() +
+  theme(text = element_text(size = 16, face = "bold"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(angle = 0, hjust = 1, size = 10, face = "plain", 
+                                   margin = margin(t = 0, r = 2, b = 0, l = 0)),
+        legend.text = element_text(face = "plain", margin = margin(b=4)),
+        legend.margin = margin(t = 0, r = 10, b = 30, l = 0))
+
+```
+
+
+
+```{r, fig.width = 10, fig.height = 5}
+# ------ Combine Richness and Shannon Diversity Violin Plots ------ 
+
+# Arranging richness and Shannon diversity plots side by side
+ggarrange(richness_plot, shannon_plot, 
+          ncol = 2, nrow = 1, 
+          common.legend = TRUE,  
+          legend = "right")
+
+ggsave("Figure_1C.png", plot = last_plot(), dpi = 300, width = 8, height = 3, units = "in")
+
+```
+
+
+
+# Beta Diversity (Bray-Curtis) 
+```{r}
+### ===========================
+###   Read in Bray-Curtis Beta Diversity Data
+### =========================== 
+bc <- read_qiime_distmat(bc_fp)
+
+```
+
+
+
+```{r}
+### ===========================
+###   Bray-Curtis Dissimilarity Analysis
+### =========================== 
+
+# Subsetting Bray-Curtis matrix to include only samples present in metadata
+bc <- dist_subset(bc, clin_micro_data$Sample_ID)
+# Performing Principal Coordinates Analysis (PCoA)
+pc <- pcoa(bc)
+# Calculating percentage of variance explained by each PCoA axis
+pctvar <- round(pc$values$Relative_eig * 100)
+# Extracting sample coordinates from PCoA
+clin_micro_data_coords <- pc$vectors %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample_ID") %>%
+  select(1:4)
+# Calculating weighted mean position of high-abundance taxa
+taxa_coords <- assignment_counts %>% 
+  right_join(s_coords, by = "Sample_ID") %>%
+  group_by(Assignment) %>%
+  filter(mean(Proportion) > 0.04) %>%    ## Filtering to retain high-abundance taxa
+  ungroup() %>%
+  # Gathering sample positions for each axis of principal coordinates
+  gather(Axis, SamplePosition, starts_with("Axis")) %>%
+  group_by(Assignment, Axis) %>%
+  # Calculating the weighted mean position along each axis
+  # This provides an average representation of the location of each taxon in the PCoA space
+  summarize(
+    TaxonPosition = weighted.mean(SamplePosition, Proportion),
+    MeanProp = mean(Proportion)) %>%
+  ungroup() %>%
+  spread(Axis, TaxonPosition) %>%
+  # Refining taxon labels for better readability
+  mutate(TaxonLabel = str_remove(Assignment, "^\\w+ "))
+
+```
+
+
+
+### Figure 1(D): Female gastrointestinal and reproductive microbial profile.
+Principal coordinate analysis using Bray-Curtis distances for the distribution of the microbial community between body sites. Each point corresponds to a sample. The shapes show the body sites and colors for the sample types included in the study. Ellipses represent aggregation by body sites.  
+```{r, fig.width = 10, fig.height = 5}
+# ------ Bray-Curtis Dissimilarity PCoA Plot ------ 
+clin_micro_data %>%
+  left_join(clin_micro_data_coords, by = "Sample_ID") %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  ggplot(aes(x = Axis.1, y = Axis.2)) +
+  geom_point(aes(fill = Sample_Type_Code, shape = Body_Site), size = 3) +
+  scale_fill_manual(values = Sample_Type_Colors, labels = Sample_Type_Names, name = "Sample Type") +
+  scale_shape_manual(values = c(21, 22, 23, 24, 25), name = "Body Site") +
+  geom_text_repel(
+    aes(label = TaxonLabel), fontface = 'bold.italic',
+    data = taxa_coords, segment.size = 0,
+    arrow = arrow()) +
+  stat_ellipse(aes(group = Body_Site)) +
+  labs(x = paste0("PC1 (", pctvar[1], "%)"),
+       y = paste0("PC2 (", pctvar[2], "%)")) +
+  theme_scatterplot() +
+  theme(text = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12, face = "plain"),
+        axis.text.y = element_text(angle = 0, hjust = 0.1, size = 12, face = "plain"),
+        legend.text = element_text(size = 14, face = "plain", 
+                                   margin = margin(r = 10, t = 3, b = 5)),
+        legend.spacing = unit(0.5, 'cm'),
+        axis.title.x = element_text(face = "plain", vjust = -1, margin = margin(t = 0, r = 0, b = 10, l = 0)),
+        axis.title.y = element_text(face = "plain", vjust = +2, margin = margin(t = 0, r = 0, b = 0, l = 10)),
+        plot.margin = margin(t = 20, r = 0, b = 0, l = 0)) +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+ggsave("Figure_1D.png", plot = last_plot(), dpi = 300, width = 6, height = 5, units = "in")
+```
+
+
+
+```{r}
+# ------ Statistical Analysis: PERMANOVA for Beta Diversity ------ 
+
+# Performing pairwise PERMANOVA using Bray-Curtis dissimilarity
+# This is to test for significant differences in microbial community composition across body sites
+Perm.Bc.Body_Site <- permanova_pairwise(bc, clin_micro_data$Body_Site, 
+                               permutations = 999, 
+                               method = "bray", 
+                               padj = "bonferroni")
+
+# Displaying PERMANOVA results
+Perm.Bc.Body_Site 
+
+```
+
+
+
+
+#-------------------------
+
+# Nestedness Stats
+```{r}
+# ------ Preparing Data for Nestedness Analysis ------ 
+
+# Cleaning up factor levels in the clinical and microbial data for nestedness analysis
+clin_micro_data.nest <- clin_micro_data %>%
+  droplevels()
+
+# This step ensures that all factor variables in clin_micro_data are free of unused levels,
+# which is important for accurate statistical analysis and visualization.
+
+```
+
+
+
+```{r}
+# ------ Exploratory Data Analysis for Nestedness ------ 
+
+# Creating a contingency table to explore the relationship between Study Group and Sample Type
+clin_micro_data.nest %>%
+  xtabs(~ Study_Group + Sample_Type_Code, data = .) # Explore relationship between Study Groups and Sample Types
+
+```
+
+
+
+```{r}
+# Extracting sample types for nestedness analysis
+sample_types <- clin_micro_data.nest %>%
+  select(Sample_ID, Sample_Type_Code)
+sample_types
+
+# Counting diagnosis groups per subject and preparing the data
+study_group <- clin_micro_data.nest %>%
+  count(SubjectID, Study_Group) %>%
+  select(-n)
+study_group
+
+```
+
+
+
+```{r}
+# ------ Calculating Jaccard Index and Nestedness Analysis ------ 
+
+# Loading required package
+library(betapart)
+
+# Preparing presence/absence matrix from OTU counts
+pres_nest <- otu_counts %>%
+  mutate(Present = as.numeric(Counts > 0)) %>%
+  right_join(clin_micro_data.nest, by = "Sample_ID") %>%
+  group_by(OtuID) %>%
+  filter(sum(Present) > 0) %>%
+  ungroup() %>%
+  usedist::pivot_to_numeric_matrix(Sample_ID, OtuID, Present)
+
+# Calculating pairwise Jaccard nestedness
+jacc_nest <- beta.pair(clin_micro_data.nest, index.family = "jaccard")
+
+
+```
+
+
+
+```{r}
+# ------ Group Analysis and Data Preparation for Visualization ------ 
+
+type_label_levels <- c(
+  # Labels for each type pair
+  "Endometrium - Oral",
+  "Endometrium - Feces",
+  "Endometrium - Vagina",
+  "Endometrium - Endometrial fluid",
+  "Vagina - Oral",
+  "Vagina - Feces",
+  "Vagina - Endometrial fluid",
+  "Oral - Feces",
+  "Oral - Endometrial fluid",
+  "Feces - Endometrial fluid"
+  )
+
+
+# Computing Jaccard Nestedness, Turnover, and Total Diversity for Each Group
+# Calculating Jaccard nestedness component for each group
+jne_group <- jacc_nest$beta.jne %>%
+  usedist::dist_subset(clin_micro_data.nest$Sample_ID) %>%
+  usedist::dist_groups(clin_micro_data.nest$SubjectID) %>%
+  filter(Group1 == Group2) %>%
+  mutate(Component = "Nestedness")
+
+# Calculating Jaccard turnover component for each group
+jtu_group <- jacc_nest$beta.jtu %>%
+  usedist::dist_subset(clin_micro_data.nest$Sample_ID) %>%
+  usedist::dist_groups(clin_micro_data.nest$SubjectID) %>%
+  filter(Group1 == Group2) %>%
+  mutate(Component = "Turnover")
+
+# Calculating Jaccard total diversity component for each group
+jac_group <- jacc_nest$beta.jac %>%
+  usedist::dist_subset(clin_micro_data.nest$Sample_ID) %>%
+  usedist::dist_groups(clin_micro_data.nest$SubjectID) %>%
+  filter(Group1 == Group2) %>%
+  mutate(Component = "Total")
+
+
+# Combining and arranging nestedness, turnover, and total diversity components
+jacc_nest_group <- bind_rows(jne_group, jtu_group, jac_group) %>%
+  arrange(Item1, Item2, Component) %>%
+  dplyr::rename(SubjectID = Group1) %>%
+  select(-Group2, -Label) %>%
+  # Enriching data with sample types
+  left_join(sample_types, by = c(Item1 = "Sample_ID")) %>%
+  dplyr::rename(Type1 = Sample_Type_Code) %>%
+  left_join(sample_types, by = c(Item2 = "Sample_ID")) %>%
+  dplyr::rename(Type2 = Sample_Type_Code) %>%
+  # Creating a label for each pair of sample types
+  mutate(TypeLabel = paste(Type1, "-", Type2)) %>%
+  mutate(TypeLabel = fct_relevel(TypeLabel)) %>%
+  # Adding study group information
+  left_join(study_group, by = "SubjectID") %>%
+  group_by(Item1, Item2) %>%
+  ungroup() %>%
+  # Identifying samples belonging to specific study groups
+  mutate(hasEM = str_detect(Study_Group, "Endometriosis")) %>%
+  mutate(hasOther_Conditions = str_detect(Study_Group, "Other_Conditions")) %>%
+  # Setting the order of components for analysis
+  mutate(Component = fct_relevel(
+    Component, c("Nestedness", "Turnover", "Total")))
+
+```
+
+
+
+```{r}
+# Logit Transformation Function
+logit <- function (x, base = 10, impute = 1e-5) {
+  x <- if_else(x <= 0, impute, x)
+  x <- if_else(x >= 1, 1 - impute, x)
+  log(x / (1 - x), base = base)
+}
+
+# ------ Linear Regression Analysis on Jaccard Nestedness Group Data ------ 
+
+# Endometriosis group
+jacc_nest_group_lm.EM <- jacc_nest_group %>%
+  group_by(TypeLabel, Component) %>%
+  do(broom::tidy(lm(logit(Distance + 1e-5) ~ hasEM, data=.))) %>% 
+  filter(!(term %in% "(Intercept)")) %>%
+  mutate(term = str_remove(term, "^has")) %>%
+  mutate(term = str_remove(term, "TRUE$"))
+
+# Other conditions group
+jacc_nest_group_lm.Other_Conditions <- jacc_nest_group %>%
+  group_by(TypeLabel, Component) %>%
+  do(broom::tidy(lm(logit(Distance + 1e-5) ~ hasOther_Conditions, data=.))) %>% 
+  filter(!(term %in% "(Intercept)")) %>%
+  mutate(term = str_remove(term, "^has")) %>%
+  mutate(term = str_remove(term, "TRUE$"))
+
+# Combining results from both groups
+jacc_nest_group_lm <- jacc_nest_group_lm.Other_Conditions %>% rbind(jacc_nest_group_lm.EM)
+```
+
+
+```{r}
+# ------ Defining Colors and Labels for Diagnosis Groups ------ 
+
+# Setting custom color codes for different diagnosis groups
+dx_color <- c("Endometriosis" = "#ff4562", 
+            "Other_Conditions" = "#008cc8")
+
+# Setting labels for different diagnosis groups
+dx_label <- c("Endometriosis" = "Endometriosis", 
+            "Other_Conditions" = "Other_Conditions")
+
+```
+
+
+## Figure 2(C): FRT-GIT microbiome connection in infertility through nestedness.
+Nestedness (richness difference between sites), Turnover (species replacement between sites), and total microbial taxa comparing endometriosis and other conditions.
+```{r, fig.width = 10, fig.height = 5}
+# ------ Nestedness Plot ------ 
+
+# Preparing data for nestedness and turnover graphics
+jacc_nest_group_lm %>%
+  mutate(term = fct_relevel(term, "Other_Conditions", "Endometriosis")) %>%
+  mutate(TypeLabel = fct_relevel(TypeLabel, c(
+    # Preparing data for nestedness and turnover graphics
+  "Endometrium - Oral",
+  "Endometrium - Feces",
+  "Endometrium - Vagina",
+  "Endometrium - Endometrial fluid",
+  "Vagina - Oral",
+  "Vagina - Feces",
+  "Vagina - Endometrial fluid",
+  "Oral - Feces",
+  "Oral - Endometrial fluid",
+  "Feces - Endometrial fluid"))) %>%
+  mutate(sig = if_else(p.value < 0.05, "P < 0.05", "n.s.")) %>%
+    # Creating the plot
+  ggplot(aes(x = term, color = term)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "#555555") +
+  geom_point(aes(y = estimate, shape = sig)) +
+  geom_linerange(aes(
+    ymin = estimate - std.error, ymax = estimate + std.error)) +
+  coord_flip() +
+  facet_grid(TypeLabel ~ Component) +
+  scale_x_discrete(labels = dx_label) +
+  scale_color_manual(values = dx_color, labels = dx_label) +
+  scale_shape_manual(values = c(1, 16)) +
+  labs(y="Estimated effect (log-fold change)", x = "", colour = "Infertility", shape = "Stats") +
+  theme(text = element_text(size = 12, color = "#000000"),
+    strip.background = element_blank(),
+    strip.text.y = element_text(angle=0, hjust = 0),
+    strip.text.x = element_text(face = "bold"),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 11))
+
+ggsave("Figure_2C.png", plot = last_plot(), dpi = 300, width = 9, height = 6 , units = "in")
+```
+
+
+
+```{r}
+# ------ Preparing Subject Pairs for Analysis ------ 
+
+# Creating a wider dataset with subject IDs and sample IDs for each sample type
+subj_pairs <- clin_micro_data %>%
+  pivot_wider(
+    id_cols = SubjectID,
+    names_from = Sample_Type_Code,
+    values_from = Sample_ID) %>%
+  # Filtering out subjects missing all sample types
+  filter(!is.na(`Oral`) | !is.na(`Feces`) | !is.na(`Endometrium`) | !is.na(`Vagina`) | !is.na(`Endometrial fluid`)) %>%
+  # Pivoting back to long format with only Sample IDs
+  pivot_longer(
+    -SubjectID, names_to = "Sample_Type_Code", values_to = "Sample_ID") %>%
+  select(Sample_ID)
+
+# Removing rows with NA values in Sample_ID
+subj_pairs <- na.omit(subj_pairs)
+
+```
+
+
+
+```{r}
+# Defining a function to extract the last word from a string
+last_word <- function (x) {
+  x %>%
+    str_split(" ") %>%
+    vapply(function (y) y[length(y)], "hello")
+}
+
+# Calculating paired proportions of OTUs in different sample types
+paired_props <- clin_micro_data %>%
+  right_join(subj_pairs, by = "Sample_ID") %>%
+  left_join(otu_counts, by = "Sample_ID") %>%
+  group_by(Sample_ID) %>%
+  mutate(Proportion = Counts / sum(Counts)) %>%
+  ungroup() %>%
+  select(SubjectID, Sample_Type_Code, OtuID, Assignment,
+         Proportion, Study_Group) %>%
+  # Lumping less abundant taxa into an 'Other' category. 
+  mutate(AssignmentLabel = fct_lump(last_word(Assignment), n = 6, w = Proportion)) %>%  ## Keeping top 6 
+  pivot_wider(
+    names_from = Sample_Type_Code, values_from = Proportion) %>%
+  tidyr::unnest() %>% 
+  # Filtering for samples with non-zero proportions
+  filter(((`Oral` > 0) | (`Feces` > 0) | (`Endometrium` > 0) | (`Vagina` > 0) | (`Endometrial fluid` > 0))) %>%
+  filter(!(AssignmentLabel %in% "Other_Conditions"))
+
+# Replacing NA values with 0
+paired_props[is.na(paired_props)] <- 0
+
+```
+
+
+
+## Figure 2(A-B): FRT-GIT microbiome connection in infertility through nestedness.
+(A) Top six common bacterial ASVs between endometrial and vagina samples as female reproductive tract sample types, (B) and ASVs between oral and feces samples corresponding to the gastrointestinal tract. 
+```{r, fig.width = 11, fig.height = 5}
+# ------ Scatterplot to compare bacterial ASVs abundance between Vagina and Endometrium ------ 
+paired_props %>%
+  # Add a small constant to 'Vagina' and 'Endometrium' columns to avoid log(0) issues
+  mutate(`Vagina` = `Vagina` + 1e-5) %>%
+  mutate(`Endometrium` = `Endometrium` + 1e-5) %>%
+  ggplot() +
+  geom_point(aes(
+    x = `Vagina`, y = `Endometrium`, color = Study_Group), size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  facet_wrap(~ AssignmentLabel, ncol = 3) +
+  scale_color_manual(values = dx_color, name = "Infertility", labels = dx_label) +
+  scale_shape_manual(values = c(16, 17, 1, 2)) +
+  # Transform x and y scales to logarithmic and format axis labels
+  scale_x_log10(
+    labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_y_log10(
+    labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  labs(
+    x = "Abundance in Vagina Samples",
+    y = "Abundance in Endometrium Samples") +
+  theme_boxplot() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12, face = "plain"),
+        axis.text.y = element_text(angle = 0, hjust = 0.1, size = 12, face = "plain"),
+        legend.text = element_text(size = 16, face = "plain", 
+                                   margin = margin(r = 0, b = 0)),
+        strip.text = element_text(size = 16, face = "plain"),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+ggsave("Figura_2A.png", plot = last_plot(), dpi = 300, width = 11, height = 6, units = "in")
+
+```
+
+
+```{r, fig.width = 11, fig.height = 5}
+# ------ Scatterplot to compare bacterial ASVs abundance between Oral and Feces ------ 
+paired_props %>%
+  mutate(`Oral` = `Oral` + 1e-5) %>%
+  mutate(`Feces` = `Feces` + 1e-5) %>%
+  ggplot() +
+  geom_point(aes(
+    x = `Oral`, y = `Feces`, color = Study_Group), size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  facet_wrap(~ AssignmentLabel, ncol = 3) +
+  scale_color_manual(values = dx_color, name = "Infertility", labels = dx_label) +
+  scale_shape_manual(values = c(16, 17, 1, 2)) +
+  scale_x_log10(
+    labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  scale_y_log10(
+    labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  labs(
+    x = "Abundance in Oral Samples",
+    y = "Abundance in Feces Samples") +
+  theme_boxplot() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 16, face = "bold"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 12, face = "plain"),
+        axis.text.y = element_text(angle = 0, hjust = 0.1, size = 12, face = "plain"),
+        legend.text = element_text(size = 16, face = "plain", 
+                                   margin = margin(r = 0, b = 0)),
+        strip.text = element_text(size = 16, face = "plain"),
+        axis.title.x = element_text(margin = margin(t = 10)),
+        axis.title.y = element_text(margin = margin(r = 10)))
+
+ggsave("Figure_2B.png", plot = last_plot(), dpi = 300, width = 11, height = 6, units = "in")
+
+```
+
+
+
+```{r}
+# ------ Analyzing Shared Presence of Taxa in Sample Type Combinations ------ 
+
+# Defining the order of shared location levels
+shared_location_levels = c("Shared Endometrium - Oral",
+  "Shared Endometrium - Feces",
+  "Shared Endometrium - Vagina",
+  "Shared Endometrium - Endometrial fluid",
+  "Shared Vagina - Oral",
+  "Shared Vagina - Feces",
+  "Shared Vagina - Endometrial fluid",
+  "Shared Oral - Feces",
+  "Shared Oral - Endometrial fluid",
+  "Shared Feces - Endometrial fluid")
+
+# Calculating shared presence across different sample types
+shared_paired_pres <- paired_props %>%
+  # Creating indicators for presence in each sample type
+  mutate(Fpres = `Feces` > 0,  Opres = `Oral` > 0,  Epres = `Endometrium` > 0,  
+         Vpres = `Vagina` > 0,  EFpres = `Endometrial fluid` > 0) %>%
+  # Creating indicators for shared presence between sample types
+  mutate(
+    `Shared` = Fpres & Epres & Vpres & Opres & EFpres,
+    `Shared Endometrium - Oral` = Epres & Opres,
+    `Shared Endometrium - Feces` = Epres & Fpres,
+    `Shared Endometrium - Vagina`= Epres & Vpres,
+    `Shared Endometrium - Endometrial fluid`= Epres & EFpres,
+    `Shared Vagina - Oral`= Vpres & Opres,
+    `Shared Vagina - Feces`= Vpres & Fpres,
+    `Shared Vagina - Endometrial fluid`= Vpres & EFpres,
+    `Shared Oral - Feces`= Opres & Fpres,
+    `Shared Oral - Endometrial fluid`= Opres & EFpres,
+    `Shared Feces - Endometrial fluid`= Epres & EFpres) %>%
+   # Transforming data to long format
+  pivot_longer(
+    c(Shared, "Shared Endometrium - Oral",
+  "Shared Endometrium - Feces",
+  "Shared Endometrium - Vagina",
+  "Shared Endometrium - Endometrial fluid",
+  "Shared Vagina - Oral",
+  "Shared Vagina - Feces",
+  "Shared Vagina - Endometrial fluid",
+  "Shared Oral - Feces",
+  "Shared Oral - Endometrial fluid",
+  "Shared Feces - Endometrial fluid"), 
+    names_to = "Location", values_to = "Detected"
+  ) %>%
+  filter(Detected) %>%
+  mutate(Location = fct_relevel(Location, shared_location_levels))
+
+```
+
+
+
+```{r}
+# ------ Defining Color Palette for Shared Sample Type Combinations ------ 
+
+# Setting custom color codes for each combination of shared sample types
+shared_color <- c(
+  "Shared" = "#9c2334",
+  "Shared Endometrium - Oral" = "#a5d389",
+  "Shared Endometrium - Feces" = "#345d17", 
+  "Shared Endometrium - Vagina" = "#01a173",  
+  "Shared Endometrium - Endometrial fluid" = "#88d6b0", 
+  "Shared Vagina - Oral" = "#4b7dac",
+  "Shared Vagina - Feces" = "#3b4f92",
+  "Shared Vagina - Endometrial fluid" = "#ff6a51",
+  "Shared Oral - Feces" = "#1f4fa3",
+  "Shared Oral - Endometrial fluid" = "#8cb000",
+  "Shared Feces - Endometrial fluid" = "#952b41"
+) 
+
+```
+
+
+
+## Figure 2(C): FRT-GIT microbiome connection in infertility through nestedness.
+Relative abundance of different ASVs found in each group when compared between different body sites in percentages. ASV, amplicon sequence variant. 
+```{r, fig.width = 11, fig.height = 5}
+# ------ Bar Plot of Shared 16S Amplicon Sequence Variants ------ 
+
+# Loading required package
+library("scales")
+
+# Creating the plot
+shared_paired_pres %>%
+  select(-c(SubjectID)) %>%
+  group_by(OtuID) %>%
+  mutate(Location = fct_relevel(Location, c(
+  "Shared Endometrium - Oral",
+  "Shared Endometrium - Feces",
+  "Shared Endometrium - Vagina",
+  "Shared Endometrium - Endometrial fluid",
+  "Shared Vagina - Oral",
+  "Shared Vagina - Feces",
+  "Shared Vagina - Endometrial fluid",
+  "Shared Oral - Endometrial fluid",
+  "Shared Feces - Endometrial fluid",
+  "Shared Oral - Feces"))) %>%
+  ggplot() +
+  geom_bar(aes(y = AssignmentLabel, fill = Location), position = "fill", alpha = 0.85) +
+  scale_fill_manual(values = shared_color , drop = FALSE) +
+  facet_grid(~ Study_Group, 
+             labeller = labeller(.cols = dx_label),
+             scales = "free", 
+             space = "free_x") +
+  labs(y = "", x = "Percentage of 16S amplicon sequence\nvariants shared between sample types", fill = "") +
+  theme_scatterplot() +
+  theme(
+    text = element_text(size = 19),
+    axis.text.x = element_text(margin = margin(r = 0, t = 2, b = 4, l = 0)),
+    axis.ticks.y = element_blank(),
+    axis.title.x = element_text(size = 17),
+    axis.text.y = element_text(angle = 0, hjust = 1, face = "plain", 
+                                   margin = margin(r = 0, t = 3, b = 0, l = 0)),
+    strip.text = element_text(face = "bold", size = 15),
+    legend.title = element_text(face = "bold"),
+    panel.spacing = unit(0.5, "cm"),
+    strip.background = element_blank()) +
+  scale_x_continuous(labels = scales::percent_format())
+
+ggsave("Figure_2D.png", plot = last_plot(), dpi = 300, width = 12, height = 5, units = "in")
+
+```
+
+
+
+#-------------------------
+
+# Figure 3(A): Female reproductive tract microbiome associated with infertility. 
+Main relative abundance of bacteria showing the variability between patients (in columns) separated in endometriosis and other infertility conditions (vertical panels) and sample types such as endometrium and vagina (horizontal panels).
+```{r, fig.width = 10, fig.height = 5}
+# ------ Bar Plot of Bacterial Abundance for Endometrial and Vaginal Samples ------ 
+
+# Defining a custom color palette
+my_palette <- c(
+  "#32A251", "#BCBD22", "#9467BD", "#E377C2","#1F77B4", 
+  "#5F9ED1","#D63A3A", "#F47942", "#AC613C", "#7F7F7F"
+  )
+
+# Creating the bar plot 
+taxa %>%
+  filter(Sample_Type_Code %in% c("1", "3")) %>%     ## Keeping only endometrial and vaginal samples  
+  ggplot(aes(x = SubjectID, y = Proportion)) +
+  geom_col(aes(fill = fct_relevel(TaxonLabel, "Other_Conditions", after = Inf)), 
+           width = 0.98, position = "fill") +
+  labs(x = "", y = "Bacterial Abundance") +
+  scale_fill_manual(values = my_palette) +
+  labs(x = "", y = "Relative Abundance", fill = "Bacteria") +
+  theme_scatterplot() +
+  facet_grid(
+    Sample_Type_Code ~ Study_Group,
+    labeller = labeller(.cols = dx_label, .rows = Sample_Type_Names),
+    scales = "free",
+    space = "free"
+  ) +
+  theme_tufte(base_size = 16, base_family = "Arial") +
+  theme( text = element_text(color = "black"),
+    panel.spacing.x = unit(0.1, "lines"),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    axis.title.y = element_text(margin = margin(r = 5)),
+    legend.title = element_text(face = "bold"),
+    strip.text = element_text(face = "bold", size = 18),
+    legend.text = element_text(size = 14)
+  )
+
+ggsave("Figure_3A.png", plot = last_plot(), dpi = 300, width = 9, height = 6, units = "in")
+
+```
+
+
+
+# Figure 3(B): Female reproductive tract microbiome associated with infertility. 
+Boxplot showing the diversity index for sample types (endometrium and vagina) and infertility groups such as endometriosis and other infertility conditions. 
+```{r, fig.width = 10, fig.height = 5}
+# ------ Boxplot of Shannon Diversity for Endometrial and Vaginal Samples ------ 
+
+clin_micro_data %>%
+  filter(Sample_Type_Code %in% c("1", "3")) %>%     ## Keeping only endometrial and vaginal samples  
+  left_join(alpha_df, by = "Sample_ID") %>%
+  ggplot(aes(x = Sample_Type_Code, y = Shannon, colour = Sample_Type_Code)) +
+  scale_x_discrete(labels = Sample_Type_Names) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_beeswarm(aes(colour = Sample_Type_Code), size = 2, alpha = 0.5) +
+  scale_colour_manual(values = Sample_Type_Colors, labels = Sample_Type_Code) +
+  labs(x = "", y = "Shannon", colour = "Sample type") +
+  facet_grid(~Study_Group,
+             labeller = labeller(.cols = dx_label),
+             scales = "fixed",
+             space = "fixed") +
+  theme_scatterplot() +
+  theme(strip.text = element_text(face = "bold", size = 16),
+         legend.text = element_text(size = 13),
+         axis.text.y = element_text(size = 16),
+         legend.title = element_text(size = 16, face = "bold", 
+                                   margin = margin(t = 0, r = 0, b = 5, l = 0)),
+         axis.title.y = element_text(size = 16, face = "bold",
+                                     margin = margin(t = 0, r = 5, b = 0, l = 0)))
+
+ggsave("Figure_3B.png", plot = last_plot(), dpi = 300, width = 8, height = 4, units = "in")
+
+```
+
+
+
+```{r}
+# ------ Numerical Data to Describe the Results of Shannon Diversity ------ 
+
+# Function to calculate mean Shannon diversity for a given sample type and study group
+calculate_mean_shannon <- function(sample_type, study_group) {
+  clin_micro_data %>%
+    filter(Sample_Type_Code %in% c(sample_type)) %>%
+    left_join(alpha_df, by = "Sample_ID") %>%
+    filter(Study_Group == study_group) %>%
+    summarize(mean_shannon = mean(Shannon, na.rm = TRUE)) %>%
+    pull(mean_shannon)
+}
+
+# Mean Shannon diversity values in Endometrium and Vagina for Endometriosis group
+shannon_EM_Endometrium <- calculate_mean_shannon("1", "Endometriosis")
+shannon_EM_Vagina <- calculate_mean_shannon("3", "Endometriosis")
+
+# Mean Shannon diversity values in Endometrium and Vagina for Other Conditions group
+shannon_OC_Endometrium <- calculate_mean_shannon("1", "Other_Conditions")
+shannon_OC_Vagina <- calculate_mean_shannon("3", "Other_Conditions")
+
+# Printing results
+shannon_EM_Endometrium
+shannon_EM_Vagina
+shannon_OC_Endometrium
+shannon_OC_Vagina
+
+```
+
+```{r}
+# ------ Pairwise Wilcoxon Test for Shannon Diversity in Endometrium and Vagina Samples ------ 
+
+# Preparing the dataset for analysis
+alpha_Endometrium_Vagina <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  filter(Sample_Type_Code %in% c("1", "3"))
+
+# Performing Wilcoxon test across study groups for Shannon diversity
+Wilcox_lalpha_Endometrium_Vagina <- compare_means(Shannon ~ Study_Group, 
+                                                  data = alpha_Endometrium_Vagina,
+                                                  method = "wilcox.test", 
+                                                  p.adjust.method = "BH")
+# Displaying the test results
+Wilcox_lalpha_Endometrium_Vagina
+
+```
+
+```{r}
+# ------ Wilcoxon Test for Study Groups: Endometrium vs Vagina ------ 
+
+# Preparing data for Endometriosis group
+EM_alpha_Endometrium_Vagina <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  filter(Sample_Type_Code %in% c("1", "3"), Study_Group == "Endometriosis")
+
+# Performing Wilcoxon test for Shannon diversity in Endometriosis group
+Wilcox_EM_alpha_Endometrium_Vagina <- compare_means(Shannon ~ Sample_Type_Code, 
+                                                    data = EM_alpha_Endometrium_Vagina,
+                                                    method = "wilcox.test", 
+                                                    p.adjust.method = "BH")
+# Displaying the test results
+Wilcox_EM_alpha_Endometrium_Vagina
+
+# Similar approach for Other_Conditions group
+OC_alpha_Endometrium_Vagina <- clin_micro_data %>%
+  left_join(alpha_df, by = "Sample_ID") %>%
+  filter(Sample_Type_Code %in% c("1", "3"), Study_Group == "Other_Conditions")
+
+Wilcox_OC_alpha_Endometrium_Vagina <- compare_means(Shannon ~ Sample_Type_Code, 
+                                                    data = OC_alpha_Endometrium_Vagina,
+                                                    method = "wilcox.test", 
+                                                    p.adjust.method = "BH")
+# Displaying the test results
+Wilcox_OC_alpha_Endometrium_Vagina
+
+```
+
+
+
+# Figure 3(C): Female reproductive tract microbiome associated with infertility. 
+Mean of bacterial abundance and its standard deviation related to endometriosis and other infertility conditions. 
+```{r}
+# Preparing Data for Bacterial Abundance Errobars Barplot for Endometrial and Vaginal Samples
+taxa_Endometrium_Vagina <- taxa %>%
+  filter(Timepoint  ==  "1") %>%
+  filter(Sample_Type_Code %in% c("1", "3")) %>%
+  group_by(Study_Group, TaxonLabel, Sample_Type_Code) %>%
+  summarise(Abundance = mean(Proportion),
+    sd = mean_se(Proportion)) %>% 
+  ungroup()
+
+```
+
+```{r, fig.width = 10, fig.height = 5}
+# ------ Errobars Barplot for Endometrial and Vaginal Samples ------ 
+
+taxa_Endometrium_Vagina %>%
+  ggplot(aes(x = fct_relevel(TaxonLabel, "Other_Conditions", after = Inf), 
+             y = sd$y, fill = Sample_Type_Code)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  geom_errorbar(aes(ymin = sd$y, ymax = sd$ymax), width = .3, position = position_dodge(0.9),
+                size = 0.3, color = "black") +
+  labs(x = "", y = "Bacterial Abundance", fill = "Sample Type") +
+  scale_fill_manual(values = Sample_Type_Colors, labels = Sample_Type_Names) +
+  theme_scatterplot() +
+  facet_grid(~Study_Group,
+             labeller = labeller(.cols = dx_label), 
+             scales = "free",
+             space = "free") +
+  theme(legend.text = element_text(size = 14, margin = margin(t=3, b=5)),
+        axis.text.y = element_text(size = 14),
+        legend.title = element_text(size = 14, face = "bold", 
+                                   margin = margin(t = 0, r = 0, b = 3, l = 0)),
+        axis.title.y = element_text(size = 14),
+        axis.text.x = element_text(angle = 50, hjust = 1, size = 14, face = "plain"),
+        plot.margin = margin(t = 10, r = 10, b = 0, l = 20),
+        strip.text = element_text(face = "bold", size = 14))
+
+ggsave("Figure_3C.png", plot = last_plot(), dpi = 300, width = 9, height = 5, units = "in")
+
+```
+
+
+
+# Beta Diversity (Weighted UniFrac Distance) 
+```{r}
+### ===========================
+###   Read in Weighted UniFrac Distance Beta Diversity Data
+### ===========================
+
+# Reading the Weighted UniFrac distance matrix from Qiime2 output
+wu <- read_qiime_distmat(wu_fp)
+
+```
+
+```{r}
+# ------ Subsetting Endometrium and Vagina Samples for Analysis ------ 
+
+# Filtering clin_micro_data for endometrium and vagina samples
+cmd_en_va <- clin_micro_data %>%
+  filter(Sample_Type_Code %in% c("1", "3"))
+
+```
+
+```{r}
+### ===========================
+###   Principal Coordinates Analysis on Weighted UniFrac for Selected Samples
+### =========================== 
+
+# Subsetting the Weighted UniFrac distance matrix for selected samples
+wu_en_va<- dist_subset(wu, cmd_en_va$Sample_ID)
+
+# Performing Principal Coordinates Analysis
+pc <- pcoa(wu_en_va)
+pctvar <- round(pc$values$Relative_eig * 100)
+
+# Extracting principal coordinate positions of samples
+cmd_en_va_coords <- pc$vectors %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample_ID") %>%
+  select(1:4)
+
+# Calculating weighted mean position of taxa along each axis
+taxa_coords <- assignment_counts %>% 
+  right_join(cmd_en_va_coords, by="Sample_ID") %>%
+  group_by(Assignment) %>%
+  filter(mean(Proportion) > 0.03) %>%    ## Filtering to retain high-abundance taxa  
+  ungroup() %>%
+  # Gathering sample positions for each axis of principal coordinates
+  gather(Axis, SamplePosition, starts_with("Axis")) %>%
+  group_by(Assignment, Axis) %>%
+  # Calculating the weighted mean position along each axis
+  summarize(
+    TaxonPosition = weighted.mean(SamplePosition, Proportion),
+    MeanProp = mean(Proportion)) %>%
+  ungroup() %>%
+  spread(Axis, TaxonPosition) %>%
+  # Refining taxon labels for better readability
+  mutate(TaxonLabel = str_remove(Assignment, "^\\w+ "))
+
+```
+
+
+
+## Figure 3(D): Female reproductive tract microbiome associated with infertility. 
+Principal coordinate analysis that evaluates the distribution of the microbial community using weighted Unifrac distances. The colors correspond to the type and shape of the sample to women as an egg receptor.
+```{r, fig.width = 10, fig.height = 5}
+# ------ Weighted UniFrac PCoA Plot ------ 
+cmd_en_va %>%
+  left_join(cmd_en_va_coords, by = "Sample_ID") %>%
+  ggplot(aes(x = Axis.1, y = Axis.2)) +
+  geom_point(
+    aes(fill = Sample_Types_Code,  shape = Eggs_Receptor), size = 5) +
+  scale_fill_manual(values = Sample_Type_Colors, name = "Sample type", labels = Sample_Type_Names) +
+  scale_shape_manual(values = c(21, 24), name = "Egg Receptor") +
+  geom_text_repel(
+   aes(label = TaxonLabel), family = "Arial", fontface = 'bold.italic', size = 4,
+   data = taxa_coords, segment.size = 0) +
+  labs(
+    x = paste0("PC1 (", pctvar[1], "%)"),
+    y = paste0("PC2 (", pctvar[2], "%)"),
+     fill = "Diagnosis", shape = "") +
+  facet_grid(~Study_Group,
+             labeller = labeller(.cols = dx_label), 
+             scales = "free",
+             space = "free") +
+  theme_scatterplot() +
+  theme(text = element_text(size = 16),
+        legend.title = element_text(size = 16, face = "bold", 
+                                   margin = margin(t = 0, r = 0, b = 3, l = 0)),
+        legend.text = element_text(margin = margin(t = 3, b = 5)),
+        strip.text = element_text(size = 16, face = "bold"),
+        plot.margin = margin(t = 10, r = 10, b = 10, l = 10)) + 
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+ggsave("Figura_3D.png", plot = last_plot(), dpi = 300, width = 9, height = 5, units = "in")
+
+```
+
+
+
+
+```{r}
+# Preparing Subsets for PERMANOVA Analysis
+
+# Filtering clin_micro_data for samples from Endometriosis group
+cmd_en_va_EM <- cmd_en_va %>%
+  filter(Study_Group == "Endometriosis")
+
+# Filtering clin_micro_data for samples from Other Conditions group
+cmd_en_va_OC <- cmd_en_va %>%
+  filter(Study_Group == "Other_Conditions")
+
+```
+
+
+```{r}
+# ------ Statistical Analysis: PERMANOVA on Weighted UniFrac Distances ------ 
+
+# Performing PERMANOVA pairwise analysis using Weighted UniFrac distances
+Perm.Wu <- permanova_pairwise(wu_en_va, cmd_en_va$Sample_Type_Code, 
+                              permutations = 999, method = "bray", 
+                              padj = "bonferroni")
+
+# Displaying the PERMANOVA results
+Perm.Wu 
+
+```
+
+

@@ -1,0 +1,38 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Sequencing data (too large / sensitive)
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.sam
+*.qza
+*.qzv
+
+# QIIME2 outputs (regenerable)
+results/
+
+# System files
+.DS_Store
+Thumbs.db
+*~
+
+# Sensitive data
+*.env
+*_credentials.*
+*_private.*
+
+# Large output files
+*.pdf
+*.png
+*.html
